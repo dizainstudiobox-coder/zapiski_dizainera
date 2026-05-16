@@ -22,7 +22,7 @@ def main() -> int:
         browser = p.chromium.launch(headless=False)
         ctx = browser.new_context(locale="ru-RU")
         page = ctx.new_page()
-        page.goto("https://dzen.ru/profile/editor", wait_until="domcontentloaded")
+        page.goto("https://dzen.ru/", wait_until="domcontentloaded")
         print()
         print("=" * 60)
         print("  Войди в Дзен в открывшемся окне.")
