@@ -1,0 +1,12 @@
+[Unit]
+Description=blog_dzen draft generator (Claude + DALL-E)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/projects/blog_dzen/code
+ExecStart=/opt/projects/blog_dzen/code/.venv/bin/python /opt/projects/blog_dzen/code/main.py
+StandardOutput=journal
+StandardError=journal
+User=root

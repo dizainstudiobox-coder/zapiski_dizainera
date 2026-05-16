@@ -1,0 +1,10 @@
+[Unit]
+Description=blog_dzen draft generator schedule (MON/WED/FRI 10:00 MSK)
+
+[Timer]
+OnCalendar=Mon,Wed,Fri *-*-* 07:00:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target

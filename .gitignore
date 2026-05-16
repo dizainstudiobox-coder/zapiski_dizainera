@@ -1,0 +1,28 @@
+# venv и кэш
+code/.venv/
+**/__pycache__/
+*.pyc
+
+# секреты
+code/.env
+
+# база и медиа
+code/blog.db
+images/
+
+# логи
+code/logs/
+*.log
+
+# Playwright
+code/playwright/
+code/state.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# token и локальные venv (добавлено 2026-05-16)
+.git_token
+code/.venv-local/
+code/dzen_state.json

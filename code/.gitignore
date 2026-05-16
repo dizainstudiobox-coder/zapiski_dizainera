@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.log
+*.db
+playwright/
+state.json
+dzen_state.json
