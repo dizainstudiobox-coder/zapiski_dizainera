@@ -392,18 +392,31 @@ def _upload_cover_in_modal(page: Page, cover_path: Path) -> None:
 def _click_final_publish(page: Page) -> None:
     publish = page.locator('[data-testid="publish-btn"]').first
     publish.wait_for(state="visible", timeout=10000)
-    deadline = time.time() + 30
+    # Ждём, пока кнопка станет активной (требуется body + title + обложка)
+    deadline = time.time() + 45
+    activated = False
     while time.time() < deadline:
         disabled = publish.get_attribute("disabled")
         if disabled is None:
+            activated = True
             break
-        page.wait_for_timeout(1000)
-    else:
+        page.wait_for_timeout(1500)
+    if not activated:
         _save_snapshot(page, "13-publish-still-disabled")
         log.warning("publish-btn так и осталась disabled — кликаю force=True")
     publish.click(force=True)
-    log.info("Клик по financial publish-btn")
-    page.wait_for_timeout(3000)
+    log.info("Клик по publish-btn (1)")
+    page.wait_for_timeout(5000)
+    # Если модалка не закрылась после первого клика — кликаем ещё раз
+    try:
+        if page.locator('[data-testid="publish-btn"]').count() > 0:
+            still_visible = page.locator('[data-testid="publish-btn"]').first.is_visible()
+            if still_visible:
+                log.info("publish-btn ещё видна — повторный клик")
+                page.locator('[data-testid="publish-btn"]').first.click(force=True)
+                page.wait_for_timeout(5000)
+    except Exception as exc:
+        log.debug("Проверка/повторный клик упали: %s", exc)
     _save_snapshot(page, "14-after-final-publish")
 
 
@@ -431,14 +444,21 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             _open_editor(page)
             _fill_body(page, body_md)
 
-            # Раньше пробовали вставку картинки в редактор через side-button.
-            # Оказалось, что drag-drop в модалке грузит обложку на CDN сам,
-            # а вставка картинки в редактор только запутывает Дзен и ломает
-            # финальный publish. Поэтому идём сразу в модалку.
+            # ВАЖНО: ТОЛЬКО _insert_cover_in_editor реально грузит картинку
+            # на CDN Дзена (через скрытый input[type=file] в side-button).
+            # JS drag-and-drop в модалке создаёт лишь визуальный preview,
+            # реальной загрузки не делает. Поэтому drag-drop НЕ используем —
+            # он только сбивает Дзен с толку.
+            cover_inserted = _insert_cover_in_editor(page, cover_path)
+            log.info("Картинка в начало body: %s", cover_inserted)
+            # Даём Дзен'у autosave-у время записать картинку на CDN
+            page.wait_for_timeout(8000)
+            _save_snapshot(page, "09-after-cover-insert")
 
             _open_preview_modal(page)
             _fill_title_in_modal(page, title)
-            _upload_cover_in_modal(page, cover_path)
+            # Картинка из body уже стала обложкой автоматически —
+            # zen-image-cover в модалке показывает её сам.
 
             _click_final_publish(page)
 
