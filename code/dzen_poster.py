@@ -22,8 +22,8 @@ import config
 
 log = logging.getLogger(__name__)
 
-EDITOR_URL = "https://dzen.ru/profile/editor/addpost?type=article"
-PROFILE_URL = "https://dzen.ru/profile/editor"
+EDITOR_URL = "https://dzen.ru/profile/editor/id/698cd7315895d9016571cee9"
+PROFILE_URL = "https://dzen.ru/profile/editor/id/698cd7315895d9016571cee9"
 
 FAILURES_DIR = Path(__file__).resolve().parent / "failures"
 FAILURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -101,10 +101,19 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             page.wait_for_timeout(5000)
 
             # === ВАЖНО: сохраняем снимок страницы СРАЗУ ===
-            _save_snapshot(page, "01-editor-opened")
-            log.info("URL после открытия редактора: %s", page.url)
+            _save_snapshot(page, "01-studio-opened")
+            log.info("URL после открытия Студии: %s", page.url)
 
-            # Если редирект — это диагностично
+            # Этап 1 — DIAGNOSTIC. Просто получаем HTML страницы Студии.
+            # Дальше код пока не идёт — увидим что в Студии и подберём
+            # селектор кнопки «Создать статью» на следующей итерации.
+            raise RuntimeError(
+                f"Diagnostic: Студия открыта по {page.url}. "
+                "HTML сохранён в failures/01-studio-opened.html. "
+                "Это намеренный stop — ждём подбора селекторов."
+            )
+
+            # Старый код ниже временно недосягаем
             if "addpost" not in page.url and "editor" not in page.url:
                 _save_snapshot(page, "02-unexpected-url")
                 raise RuntimeError(f"Редиректнуло куда-то не туда: {page.url}")
