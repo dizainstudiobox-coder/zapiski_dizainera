@@ -154,40 +154,44 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             _save_snapshot(page, "03-after-add-click")
             log.info("URL после клика: %s", page.url)
 
-            # Если URL изменился на /edit — мы в редакторе, идём дальше.
-            # Если нет — должно появиться выпадающее меню типов публикаций.
-            if "/edit" in page.url:
-                log.info("URL содержит /edit — мы уже в редакторе статьи")
-            else:
-                # Пробуем найти "Статья" в открывшемся меню
-                article_clicked = False
-                for selector in [
-                    'text="Статья"',
-                    'text=/^Статья$/',
-                    '[role="menuitem"]:has-text("Статья")',
-                    '[data-testid*="article"]',
-                ]:
-                    try:
-                        page.locator(selector).first.click(force=True, timeout=3000)
-                        log.info("Кликнул «Статья» через %s", selector)
-                        article_clicked = True
-                        page.wait_for_timeout(3000)
-                        break
-                    except Exception:
-                        continue
-                if not article_clicked:
-                    _save_snapshot(page, "04-no-article-option")
-                    raise RuntimeError(
-                        f"После клика add-publication-button и поиска «Статья» "
-                        f"не нашёл ни одного варианта. URL={page.url}"
-                    )
+            # Меню «Создать публикацию» открыто (popup-base). Кликаем «Написать статью».
+            log.info("Клик по «Написать статью»")
+            try:
+                page.locator('[aria-label="Написать статью"]').first.click(
+                    force=True, timeout=10000
+                )
+            except Exception as exc:
+                _save_snapshot(page, "04-article-click-failed")
+                raise RuntimeError(f"«Написать статью» не нашлось: {exc}") from exc
 
+            # Ждём навигацию в редактор — URL должен стать .../<post_id>/edit
+            try:
+                page.wait_for_url(
+                    lambda url: url.endswith("/edit") or "/edit?" in url,
+                    timeout=20000,
+                )
+            except Exception:
+                pass  # не страшно, всё равно снимем снимок
+
+            page.wait_for_timeout(3000)
             _save_snapshot(page, "05-after-article-select")
-            log.info("URL после выбора Статьи: %s", page.url)
+            log.info("URL после выбора «Написать статью»: %s", page.url)
 
+            if not (page.url.endswith("/edit") or "/edit?" in page.url):
+                raise RuntimeError(
+                    f"Ожидался переход в редактор статьи (URL .../edit), "
+                    f"но URL={page.url}. См. 05-after-article-select.html."
+                )
+
+            # === Мы в редакторе нового черновика. Заполнить заголовок и тело. ===
+            # Текущая версия dzen_poster.py имеет код заполнения ниже (от старого),
+            # но он рассчитан на старый UI. Сначала диагностически сохраним HTML
+            # редактора, чтобы подобрать селекторы заголовка/тела.
+            _save_snapshot(page, "06-editor-opened")
             raise RuntimeError(
-                f"Diagnostic: после полного клика URL={page.url}. "
-                "HTML сохранён в failures/05-after-article-select.html."
+                f"Diagnostic: дошли до редактора статьи URL={page.url}. "
+                "HTML сохранён в failures/06-editor-opened.html. "
+                "Следующий шаг — подбор селекторов заголовка и тела."
             )
 
             # Старый код ниже временно недосягаем
