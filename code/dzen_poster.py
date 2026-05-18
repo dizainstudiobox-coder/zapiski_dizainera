@@ -138,26 +138,56 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             page.wait_for_timeout(800)
             _save_snapshot(page, "02-after-modal-close")
 
-            # Клик через JS (bypass pointer events intercepting)
-            log.info("JS-клик на add-publication-button")
-            clicked = page.evaluate("""
-                () => {
-                    const btn = document.querySelector('[data-testid="add-publication-button"]');
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }
-            """)
-            if not clicked:
-                _save_snapshot(page, "02-no-add-button")
-                raise RuntimeError("add-publication-button не найден на странице")
+            # Playwright клик с force=True — симулирует реальный mouse event,
+            # игнорирует pointer-event блокеры. JS .click() не триггерит React onClick.
+            log.info("Playwright force-click на add-publication-button")
+            try:
+                page.locator('[data-testid="add-publication-button"]').first.click(
+                    force=True, timeout=10000
+                )
+            except Exception as exc:
+                _save_snapshot(page, "02-click-failed")
+                raise RuntimeError(f"force-click не сработал: {exc}") from exc
 
-            page.wait_for_timeout(3000)
+            # Ждём появления выпадающего меню или редиректа
+            page.wait_for_timeout(4000)
             _save_snapshot(page, "03-after-add-click")
             log.info("URL после клика: %s", page.url)
 
+            # Если URL изменился на /edit — мы в редакторе, идём дальше.
+            # Если нет — должно появиться выпадающее меню типов публикаций.
+            if "/edit" in page.url:
+                log.info("URL содержит /edit — мы уже в редакторе статьи")
+            else:
+                # Пробуем найти "Статья" в открывшемся меню
+                article_clicked = False
+                for selector in [
+                    'text="Статья"',
+                    'text=/^Статья$/',
+                    '[role="menuitem"]:has-text("Статья")',
+                    '[data-testid*="article"]',
+                ]:
+                    try:
+                        page.locator(selector).first.click(force=True, timeout=3000)
+                        log.info("Кликнул «Статья» через %s", selector)
+                        article_clicked = True
+                        page.wait_for_timeout(3000)
+                        break
+                    except Exception:
+                        continue
+                if not article_clicked:
+                    _save_snapshot(page, "04-no-article-option")
+                    raise RuntimeError(
+                        f"После клика add-publication-button и поиска «Статья» "
+                        f"не нашёл ни одного варианта. URL={page.url}"
+                    )
+
+            _save_snapshot(page, "05-after-article-select")
+            log.info("URL после выбора Статьи: %s", page.url)
+
             raise RuntimeError(
-                f"Diagnostic: после клика URL={page.url}. "
-                "HTML сохранён в failures/03-after-add-click.html."
+                f"Diagnostic: после полного клика URL={page.url}. "
+                "HTML сохранён в failures/05-after-article-select.html."
             )
 
             # Старый код ниже временно недосягаем
