@@ -111,18 +111,53 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
                     f"Не в Студии: {page.url}. Куки авторизации не приняты."
                 )
 
-            # Кликаем на «Создать публикацию» — селектор по data-testid
-            log.info("Клик на add-publication-button")
-            page.locator('[data-testid="add-publication-button"]').first.click(timeout=10000)
+            # Закрываем возможные модалки (welcome/cookie/notifications)
+            log.info("Закрываю модальные окна — Escape + remove overlays")
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+            except Exception as e:
+                log.warning("Escape не сработал: %s", e)
+            # Удаляем оверлеи напрямую через DOM
+            page.evaluate("""
+                () => {
+                    const selectors = [
+                        '[data-testid="modal-overlay"]',
+                        '[class*="editor--modal__overlay"]',
+                        '[class*="editor--modal__rootElement"]',
+                        '[class*="modal__overlay"]',
+                        '[class*="onboarding"]',
+                    ];
+                    selectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(e => e.remove());
+                    });
+                }
+            """)
+            page.wait_for_timeout(800)
+            _save_snapshot(page, "02-after-modal-close")
+
+            # Клик через JS (bypass pointer events intercepting)
+            log.info("JS-клик на add-publication-button")
+            clicked = page.evaluate("""
+                () => {
+                    const btn = document.querySelector('[data-testid="add-publication-button"]');
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }
+            """)
+            if not clicked:
+                _save_snapshot(page, "02-no-add-button")
+                raise RuntimeError("add-publication-button не найден на странице")
+
             page.wait_for_timeout(3000)
-            _save_snapshot(page, "02-after-add-click")
+            _save_snapshot(page, "03-after-add-click")
             log.info("URL после клика: %s", page.url)
 
-            # Этот raise временно — после клика нам нужно увидеть что появилось
-            # (выпадающее меню с типами или сразу редактор статьи).
             raise RuntimeError(
-                f"Diagnostic: после клика add-publication-button URL={page.url}. "
-                "HTML сохранён в failures/02-after-add-click.html."
+                f"Diagnostic: после клика URL={page.url}. "
+                "HTML сохранён в failures/03-after-add-click.html."
             )
 
             # Старый код ниже временно недосягаем
