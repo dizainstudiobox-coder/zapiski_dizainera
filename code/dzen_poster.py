@@ -267,42 +267,59 @@ def _check_cover_uploaded(page: Page) -> dict:
 
 
 def _insert_cover_in_editor(page: Page, cover_path: Path) -> bool:
-    """Вставка картинки в начало body через side-button «Вставить изображение»."""
-    body_field = page.locator('[aria-describedby="placeholder-ZenDraftEditor"]').first
-    if body_field.count() == 0:
-        body_field = page.locator('[data-editor="ZenDraftEditor"]').first
-    body_field.click(force=True)
-    page.wait_for_timeout(300)
-    page.keyboard.press("Control+Home")
-    page.wait_for_timeout(500)
-    _save_snapshot(page, "13a-before-insert-image")
+    """Вставка картинки в начало body через side-button «Вставить изображение».
 
-    btn = page.locator('button[data-tip="Вставить изображение"]').first
-    if btn.count() == 0:
-        log.warning("Кнопка «Вставить изображение» не найдена в редакторе")
-        return False
-
+    Любые ошибки этого шага НЕ должны валить публикацию — возвращаем False,
+    и публикация продолжится дальше с обычной обложкой в модалке.
+    """
     try:
-        with page.expect_file_chooser(timeout=5000) as fc_info:
-            btn.click(force=True)
-        fc = fc_info.value
-        fc.set_files(str(cover_path))
-        log.info("Картинка ушла через file chooser side-button")
-        page.wait_for_timeout(8000)
-        _save_snapshot(page, "13b-image-inserted-chooser")
-        return True
-    except PWTimeout:
-        log.warning("file chooser side-button — таймаут, ищу input[type=file]")
+        body_field = page.locator('[aria-describedby="placeholder-ZenDraftEditor"]').first
+        if body_field.count() == 0:
+            body_field = page.locator('[data-editor="ZenDraftEditor"]').first
+        body_field.click(force=True)
+        page.wait_for_timeout(300)
+        page.keyboard.press("Control+Home")
+        page.wait_for_timeout(300)
+        # Создаём пустой параграф над первой строкой, чтобы side-button «+» стал видим
+        page.keyboard.press("Enter")
+        page.keyboard.press("ArrowUp")
+        page.wait_for_timeout(500)
+        _save_snapshot(page, "13a-before-insert-image")
 
-    page.wait_for_timeout(1000)
-    if _try_set_image_input(page, cover_path):
-        log.info("Картинка ушла через set_input_files (после клика side-button)")
-        page.wait_for_timeout(8000)
-        _save_snapshot(page, "13b-image-inserted-input")
-        return True
+        btn = page.locator('button[data-tip="Вставить изображение"]').first
+        if btn.count() == 0:
+            log.warning("Кнопка «Вставить изображение» не найдена в редакторе")
+            return False
 
-    log.warning("Не удалось вставить картинку через side-button")
-    return False
+        # JS click — обходит проверку visible
+        try:
+            with page.expect_file_chooser(timeout=5000) as fc_info:
+                btn.evaluate("el => el.click()")
+            fc = fc_info.value
+            fc.set_files(str(cover_path))
+            log.info("Картинка ушла через file chooser side-button (JS click)")
+            page.wait_for_timeout(8000)
+            _save_snapshot(page, "13b-image-inserted-chooser")
+            return True
+        except PWTimeout:
+            log.warning("file chooser side-button — таймаут, ищу input[type=file]")
+
+        page.wait_for_timeout(1000)
+        if _try_set_image_input(page, cover_path):
+            log.info("Картинка ушла через set_input_files (после клика side-button)")
+            page.wait_for_timeout(8000)
+            _save_snapshot(page, "13b-image-inserted-input")
+            return True
+
+        log.warning("Не удалось вставить картинку через side-button")
+        return False
+    except Exception as exc:
+        log.warning("_insert_cover_in_editor упал, продолжаем без вставки: %s", exc)
+        try:
+            _save_snapshot(page, "13z-insert-cover-error")
+        except Exception:
+            pass
+        return False
 
 
 def _upload_cover_in_modal(page: Page, cover_path: Path) -> None:
