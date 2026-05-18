@@ -104,13 +104,25 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             _save_snapshot(page, "01-studio-opened")
             log.info("URL после открытия Студии: %s", page.url)
 
-            # Этап 1 — DIAGNOSTIC. Просто получаем HTML страницы Студии.
-            # Дальше код пока не идёт — увидим что в Студии и подберём
-            # селектор кнопки «Создать статью» на следующей итерации.
+            # Проверка — мы в Студии или нас перенесло на публичный канал
+            if "/profile/editor/id/" not in page.url:
+                _save_snapshot(page, "02-not-in-studio")
+                raise RuntimeError(
+                    f"Не в Студии: {page.url}. Куки авторизации не приняты."
+                )
+
+            # Кликаем на «Создать публикацию» — селектор по data-testid
+            log.info("Клик на add-publication-button")
+            page.locator('[data-testid="add-publication-button"]').first.click(timeout=10000)
+            page.wait_for_timeout(3000)
+            _save_snapshot(page, "02-after-add-click")
+            log.info("URL после клика: %s", page.url)
+
+            # Этот raise временно — после клика нам нужно увидеть что появилось
+            # (выпадающее меню с типами или сразу редактор статьи).
             raise RuntimeError(
-                f"Diagnostic: Студия открыта по {page.url}. "
-                "HTML сохранён в failures/01-studio-opened.html. "
-                "Это намеренный stop — ждём подбора селекторов."
+                f"Diagnostic: после клика add-publication-button URL={page.url}. "
+                "HTML сохранён в failures/02-after-add-click.html."
             )
 
             # Старый код ниже временно недосягаем
