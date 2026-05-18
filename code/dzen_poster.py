@@ -415,8 +415,10 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
             _open_editor(page)
             _fill_body(page, body_md)
 
-            cover_inserted_in_body = _insert_cover_in_editor(page, cover_path)
-            log.info("Картинка в начало body: %s", cover_inserted_in_body)
+            # Раньше пробовали вставку картинки в редактор через side-button.
+            # Оказалось, что drag-drop в модалке грузит обложку на CDN сам,
+            # а вставка картинки в редактор только запутывает Дзен и ломает
+            # финальный publish. Поэтому идём сразу в модалку.
 
             _open_preview_modal(page)
             _fill_title_in_modal(page, title)
