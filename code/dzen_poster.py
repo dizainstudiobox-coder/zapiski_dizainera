@@ -207,30 +207,114 @@ def _fill_title_in_modal(page: Page, title: str) -> None:
     _save_snapshot(page, "11-modal-title-filled")
 
 
+def _list_file_inputs(page: Page, tag: str) -> list[dict]:
+    """Diagnostic: перечисляет все input[type=file] на странице через JS."""
+    info = page.evaluate(
+        """
+        () => Array.from(document.querySelectorAll('input[type="file"]')).map(i => ({
+            accept: i.accept || '',
+            name: i.name || '',
+            id: i.id || '',
+            hiddenAttr: i.hidden,
+            displayNone: getComputedStyle(i).display === 'none',
+            offsetParentNull: i.offsetParent === null,
+            outer: i.outerHTML.substring(0, 240)
+        }))
+        """
+    )
+    log.info("[%s] input[type=file] в DOM: %d", tag, len(info))
+    for idx, item in enumerate(info):
+        log.info(
+            "  [%s] input#%d: accept=%r name=%r id=%r hidden=%s display:none=%s",
+            tag, idx, item["accept"], item["name"], item["id"],
+            item["hiddenAttr"], item["displayNone"],
+        )
+        log.info("    outer: %s", item["outer"])
+    return info
+
+
+def _try_set_image_input(page: Page, cover_path: Path) -> bool:
+    """Ищет input[type=file] с accept=image/* (или просто первый) и грузит файл.
+
+    Использует Playwright set_input_files напрямую — работает даже на
+    display:none инпутах, не требует открытия системного file chooser.
+    """
+    inputs = _list_file_inputs(page, "before_set")
+    if not inputs:
+        return False
+
+    target_idx = 0
+    for i, info in enumerate(inputs):
+        if info["accept"] and "image" in info["accept"].lower():
+            target_idx = i
+            break
+
+    try:
+        page.locator('input[type="file"]').nth(target_idx).set_input_files(
+            str(cover_path)
+        )
+        log.info("set_input_files выполнен на input#%d", target_idx)
+        return True
+    except Exception as exc:
+        log.warning("set_input_files упал на input#%d: %s", target_idx, exc)
+        return False
+
+
 def _upload_cover_in_modal(page: Page, cover_path: Path) -> None:
-    """Загружает обложку через клик по zen-image-cover + перехват file chooser."""
+    """Загружает обложку в модалке предпросмотра.
+
+    Несколько стратегий по убыванию надёжности:
+      1. Клик по zen-image-cover + expect_file_chooser (стандартный путь)
+      2. Клик по zen-image-cover → ждём, что Дзен инжектирует скрытый input в DOM
+         → set_input_files напрямую на этот input
+      3. Если input уже есть в DOM до клика — set_input_files без клика
+    """
     cover_target = page.locator('[data-testid="zen-image-cover"]').first
     cover_target.wait_for(state="visible", timeout=10000)
+
+    # 0) Diagnostic: список input до клика
+    _list_file_inputs(page, "pre-click")
+
+    # 1) Попытка через file chooser
     try:
-        with page.expect_file_chooser(timeout=10000) as fc_info:
+        with page.expect_file_chooser(timeout=5000) as fc_info:
             cover_target.click(force=True)
         fc = fc_info.value
         fc.set_files(str(cover_path))
-        log.info("Обложка отправлена в file chooser: %s", cover_path)
-        # Дзен показывает превью и (вероятно) сжимает картинку — даём время
+        log.info("Обложка ушла в file chooser zen-image-cover")
         page.wait_for_timeout(5000)
-        _save_snapshot(page, "12-cover-uploaded")
+        _save_snapshot(page, "12-cover-via-chooser")
+        return
     except PWTimeout:
-        log.warning("File chooser не открылся, пробую запасной путь — input[type=file]")
-        try:
-            file_input = page.locator('input[type="file"]').first
-            file_input.set_input_files(str(cover_path))
-            log.info("Обложка отправлена через input[type=file]: %s", cover_path)
-            page.wait_for_timeout(5000)
-            _save_snapshot(page, "12-cover-uploaded-fallback")
-        except Exception as exc:
-            log.warning("Не удалось загрузить обложку никаким способом: %s", exc)
-            _save_snapshot(page, "12-cover-failed")
+        log.warning("expect_file_chooser таймаут — пробую set_input_files")
+
+    # 2) Клик мог инжектировать input в DOM — ждём и ищем
+    page.wait_for_timeout(1500)
+    if _try_set_image_input(page, cover_path):
+        log.info("Обложка ушла через set_input_files (после клика)")
+        page.wait_for_timeout(5000)
+        _save_snapshot(page, "12-cover-via-set-input")
+        return
+
+    # 3) Возможно клик не сработал — пробуем кликнуть ещё раз без force,
+    #    плюс на дочерний placeholder
+    try:
+        placeholder = page.locator(
+            '[data-testid="zen-image-cover"] [class*="placeholder"]'
+        ).first
+        if placeholder.count():
+            placeholder.click()
+            page.wait_for_timeout(1500)
+            if _try_set_image_input(page, cover_path):
+                log.info("Обложка ушла через set_input_files (placeholder-click)")
+                page.wait_for_timeout(5000)
+                _save_snapshot(page, "12-cover-via-placeholder")
+                return
+    except Exception as exc:
+        log.debug("placeholder-click не сработал: %s", exc)
+
+    log.warning("Не удалось загрузить обложку никаким способом")
+    _save_snapshot(page, "12-cover-failed")
 
 
 def _click_final_publish(page: Page) -> None:
