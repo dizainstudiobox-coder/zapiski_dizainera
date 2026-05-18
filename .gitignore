@@ -26,3 +26,11 @@ Thumbs.db
 .git_token
 code/.venv-local/
 code/dzen_state.json
+
+# Playwright snapshots (диагностика, локально)
+code/failures/
+editor.html
+editor_actual.html
+studio.html
+studio_utf8.html
+after_click.html

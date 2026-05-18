@@ -1,10 +1,24 @@
 """Постинг статьи в Дзен через Playwright (chromium headless).
 
 Зависит от storage_state.json (DZEN_STATE_PATH) — авторизация заранее
-получается на ноуте через auth_dzen.py и переносится на сервер.
+получается на ноуте через Cookie Editor (dzen.ru + yandex.ru) и переносится
+на сервер. См. server_blog_dzen.md в памяти.
 
-После каждой важной точки шага сохраняем PNG + HTML в failures/ —
-чтобы можно было разобраться, если упадёт.
+Flow:
+  1. Открыть Студию  /profile/editor/id/{CHANNEL_ID}
+  2. Проверить авторизацию (по URL и DOM)
+  3. Закрыть приветственные модалки (Esc + ручной snip)
+  4. Force-кликнуть кнопку добавления публикации
+  5. Force-кликнуть «Написать статью»
+  6. Дождаться URL .../edit  →  Draft.js редактор
+  7. Заполнить заголовок ([role=textbox spellcheck=false]) через keyboard.type
+  8. Заполнить тело ([aria-describedby=placeholder-ZenDraftEditor]) тем же способом
+  9. Загрузить обложку через input[type=file]
+  10. Кликнуть [data-testid=article-publish-btn]
+  11. Подтвердить публикацию в модалке (если есть)
+  12. Дождаться редиректа на страницу публикации
+
+После каждой важной точки шага сохраняем PNG + HTML в failures/.
 """
 from __future__ import annotations
 
@@ -22,8 +36,8 @@ import config
 
 log = logging.getLogger(__name__)
 
-EDITOR_URL = "https://dzen.ru/profile/editor/id/698cd7315895d9016571cee9"
-PROFILE_URL = "https://dzen.ru/profile/editor/id/698cd7315895d9016571cee9"
+CHANNEL_ID = "698cd7315895d9016571cee9"
+STUDIO_URL = f"https://dzen.ru/profile/editor/id/{CHANNEL_ID}"
 
 FAILURES_DIR = Path(__file__).resolve().parent / "failures"
 FAILURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -45,36 +59,187 @@ def _save_snapshot(page: Page, tag: str) -> None:
         log.warning("HTML не сохранён (%s): %s", tag, exc)
 
 
-def _ensure_logged_in(ctx: BrowserContext) -> None:
-    page = ctx.new_page()
+def _dismiss_overlays(page: Page) -> None:
+    """Закрывает модалки и оверлеи, которые блокируют клики."""
     try:
-        page.goto(PROFILE_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-        cur = page.url
-        if "passport" in cur or "login" in cur:
-            _save_snapshot(page, "auth-redirect")
-            raise RuntimeError("Куки Дзена просрочены — нужно перевыпустить state.json")
-        log.info("Авторизация в Дзене ОК (url=%s)", cur)
-    finally:
-        page.close()
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    try:
+        page.evaluate(
+            """
+            () => {
+                const selectors = [
+                    '[data-testid="modal-overlay"]',
+                    '[class*="editor--modal__overlay"]',
+                    '[class*="editor--modal__rootElement"]',
+                    '[class*="modal__overlay"]',
+                    '[class*="onboarding"]',
+                ];
+                selectors.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(e => e.remove());
+                });
+            }
+            """
+        )
+    except Exception:
+        pass
 
 
-def _click_button(page: Page, *labels: str, timeout: int = 5000) -> bool:
-    for text in labels:
+def _ensure_logged_in(page: Page) -> None:
+    """Открывает Студию и убеждается, что мы залогинены как автор канала."""
+    log.info("Открываю Студию: %s", STUDIO_URL)
+    page.goto(STUDIO_URL, wait_until="domcontentloaded", timeout=45000)
+    page.wait_for_timeout(4000)
+
+    cur = page.url
+    if "passport" in cur or "login" in cur:
+        _save_snapshot(page, "auth-redirect")
+        raise RuntimeError(f"Куки Дзена просрочены — редирект на {cur}")
+
+    # Если редиректнуло на публичный профиль без /editor/ — авторизация не прошла как автор
+    if "/profile/editor/id/" not in cur:
+        _save_snapshot(page, "auth-not-author")
+        raise RuntimeError(
+            f"Не в Студии после захода (url={cur}). "
+            "Скорее всего сессия yandex.ru невалидна."
+        )
+    log.info("Авторизация в Дзене ОК (url=%s)", cur)
+
+
+def _open_editor(page: Page) -> None:
+    """Из Студии открывает редактор статьи и ждёт URL .../edit."""
+    _dismiss_overlays(page)
+    page.wait_for_timeout(500)
+    _save_snapshot(page, "02-after-modal-close")
+
+    # Кнопка «+» с data-testid="add-publication-button"
+    log.info("Playwright force-click на add-publication-button")
+    add_btn = page.locator('[data-testid="add-publication-button"]').first
+    add_btn.wait_for(state="visible", timeout=15000)
+    add_btn.click(force=True)
+    page.wait_for_timeout(3000)
+    _save_snapshot(page, "03-after-add-click")
+
+    # В выпадающем меню — «Написать статью»
+    log.info("Клик по «Написать статью»")
+    write_article = page.locator('[aria-label="Написать статью"]').first
+    if write_article.count() == 0:
+        write_article = page.get_by_text("Написать статью", exact=True).first
+    write_article.wait_for(state="visible", timeout=10000)
+    write_article.click(force=True)
+
+    # Ждём, пока URL станет .../edit
+    try:
+        page.wait_for_url(
+            lambda url: url.rstrip("/").endswith("/edit") or "/edit?" in url,
+            timeout=20000,
+        )
+    except Exception:
+        pass
+
+    page.wait_for_timeout(2500)
+    _save_snapshot(page, "05-after-article-select")
+    log.info("URL после выбора «Написать статью»: %s", page.url)
+
+    if not (page.url.rstrip("/").endswith("/edit") or "/edit?" in page.url):
+        raise RuntimeError(
+            f"Ожидался переход в редактор статьи (URL .../edit), "
+            f"но URL={page.url}. См. 05-after-article-select.html."
+        )
+
+    # Дать Draft.js дорендериться
+    page.wait_for_timeout(2000)
+    _save_snapshot(page, "06-editor-opened")
+
+
+def _fill_title(page: Page, title: str) -> None:
+    """Заполняет заголовок Draft.js через keyboard.type."""
+    # role=textbox + spellcheck=false — единственное такое поле (заголовок)
+    title_field = page.locator('[role="textbox"][spellcheck="false"]').first
+    title_field.wait_for(state="visible", timeout=10000)
+    title_field.click(force=True)
+    page.wait_for_timeout(300)
+    page.keyboard.type(title, delay=15)
+    log.info("Заголовок введён: %s", title[:60])
+    page.wait_for_timeout(500)
+    _save_snapshot(page, "07-title-typed")
+
+
+def _fill_body(page: Page, body_md: str) -> None:
+    """Заполняет тело статьи Draft.js (ZenDraftEditor)."""
+    body_field = page.locator(
+        '[aria-describedby="placeholder-ZenDraftEditor"]'
+    ).first
+    body_field.wait_for(state="visible", timeout=10000)
+    body_field.click(force=True)
+    page.wait_for_timeout(300)
+
+    # Markdown-разметка Дзеном не парсится, но абзацы Enter работает.
+    paragraphs = [p.strip() for p in body_md.split("\n\n") if p.strip()]
+    for idx, para in enumerate(paragraphs):
+        for line_idx, line in enumerate(para.split("\n")):
+            if line_idx > 0:
+                page.keyboard.press("Shift+Enter")
+            page.keyboard.type(line, delay=5)
+        if idx < len(paragraphs) - 1:
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(80)
+
+    log.info("Тело введено (%d символов, %d абзацев)", len(body_md), len(paragraphs))
+    page.wait_for_timeout(1000)
+    _save_snapshot(page, "08-body-typed")
+
+
+def _upload_cover(page: Page, cover_path: Path) -> None:
+    """Грузит обложку через первый input[type=file]."""
+    try:
+        file_input = page.locator('input[type="file"]').first
+        if file_input.count() == 0:
+            log.warning("input[type=file] не найден — обложку не загружаю")
+            return
+        file_input.set_input_files(str(cover_path))
+        log.info("Обложка загружена: %s", cover_path)
+        page.wait_for_timeout(4000)
+        _save_snapshot(page, "09-cover-uploaded")
+    except Exception as exc:
+        log.warning("Не получилось загрузить обложку: %s", exc)
+        _save_snapshot(page, "09-cover-failed")
+
+
+def _click_publish(page: Page) -> None:
+    """Клик по кнопке Опубликовать + подтверждение в модалке."""
+    btn = page.locator('[data-testid="article-publish-btn"]').first
+    btn.wait_for(state="visible", timeout=10000)
+    btn.click(force=True)
+    log.info("Клик по кнопке «Опубликовать»")
+    page.wait_for_timeout(2500)
+    _save_snapshot(page, "10-after-publish-click")
+
+    # В Дзене может появиться модалка подтверждения
+    for label in (
+        "Опубликовать сейчас",
+        "Опубликовать",
+        "Подтвердить",
+        "Да, опубликовать",
+    ):
         try:
-            page.get_by_role("button", name=text).first.click(timeout=timeout)
-            log.info("Клик по «%s»", text)
-            return True
+            page.get_by_role("button", name=label).first.click(timeout=2500)
+            log.info("Подтвердил публикацию: «%s»", label)
+            page.wait_for_timeout(1500)
+            break
         except Exception:
-            pass
-    return False
+            continue
 
 
 def publish_article(title: str, body_md: str, cover_path: Path) -> str:
     if not config.DZEN_STATE_PATH.exists():
         raise RuntimeError(
             f"Не найден файл сессии {config.DZEN_STATE_PATH}. "
-            "Сгенерируй его через auth_dzen.py."
+            "Экспортируй куки dzen.ru + yandex.ru через Cookie Editor "
+            "и собери storage_state."
         )
 
     with sync_playwright() as p:
@@ -91,219 +256,39 @@ def publish_article(title: str, body_md: str, cover_path: Path) -> str:
                 "Chrome/127.0.0.0 Safari/537.36"
             ),
         )
-        page = None
+        page = ctx.new_page()
         try:
-            _ensure_logged_in(ctx)
-
-            page = ctx.new_page()
-            log.info("Открываю редактор: %s", EDITOR_URL)
-            page.goto(EDITOR_URL, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(5000)
-
-            # === ВАЖНО: сохраняем снимок страницы СРАЗУ ===
+            _ensure_logged_in(page)
             _save_snapshot(page, "01-studio-opened")
-            log.info("URL после открытия Студии: %s", page.url)
 
-            # Проверка — мы в Студии или нас перенесло на публичный канал
-            if "/profile/editor/id/" not in page.url:
-                _save_snapshot(page, "02-not-in-studio")
-                raise RuntimeError(
-                    f"Не в Студии: {page.url}. Куки авторизации не приняты."
-                )
+            _open_editor(page)
 
-            # Закрываем возможные модалки (welcome/cookie/notifications)
-            log.info("Закрываю модальные окна — Escape + remove overlays")
-            try:
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
-            except Exception as e:
-                log.warning("Escape не сработал: %s", e)
-            # Удаляем оверлеи напрямую через DOM
-            page.evaluate("""
-                () => {
-                    const selectors = [
-                        '[data-testid="modal-overlay"]',
-                        '[class*="editor--modal__overlay"]',
-                        '[class*="editor--modal__rootElement"]',
-                        '[class*="modal__overlay"]',
-                        '[class*="onboarding"]',
-                    ];
-                    selectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(e => e.remove());
-                    });
-                }
-            """)
-            page.wait_for_timeout(800)
-            _save_snapshot(page, "02-after-modal-close")
+            _fill_title(page, title)
+            _fill_body(page, body_md)
 
-            # Playwright клик с force=True — симулирует реальный mouse event,
-            # игнорирует pointer-event блокеры. JS .click() не триггерит React onClick.
-            log.info("Playwright force-click на add-publication-button")
-            try:
-                page.locator('[data-testid="add-publication-button"]').first.click(
-                    force=True, timeout=10000
-                )
-            except Exception as exc:
-                _save_snapshot(page, "02-click-failed")
-                raise RuntimeError(f"force-click не сработал: {exc}") from exc
+            _upload_cover(page, cover_path)
 
-            # Ждём появления выпадающего меню или редиректа
-            page.wait_for_timeout(4000)
-            _save_snapshot(page, "03-after-add-click")
-            log.info("URL после клика: %s", page.url)
+            _click_publish(page)
 
-            # Меню «Создать публикацию» открыто (popup-base). Кликаем «Написать статью».
-            log.info("Клик по «Написать статью»")
-            try:
-                page.locator('[aria-label="Написать статью"]').first.click(
-                    force=True, timeout=10000
-                )
-            except Exception as exc:
-                _save_snapshot(page, "04-article-click-failed")
-                raise RuntimeError(f"«Написать статью» не нашлось: {exc}") from exc
-
-            # Ждём навигацию в редактор — URL должен стать .../<post_id>/edit
-            try:
-                page.wait_for_url(
-                    lambda url: url.endswith("/edit") or "/edit?" in url,
-                    timeout=20000,
-                )
-            except Exception:
-                pass  # не страшно, всё равно снимем снимок
-
-            page.wait_for_timeout(3000)
-            _save_snapshot(page, "05-after-article-select")
-            log.info("URL после выбора «Написать статью»: %s", page.url)
-
-            if not (page.url.endswith("/edit") or "/edit?" in page.url):
-                raise RuntimeError(
-                    f"Ожидался переход в редактор статьи (URL .../edit), "
-                    f"но URL={page.url}. См. 05-after-article-select.html."
-                )
-
-            # === Мы в редакторе нового черновика. Заполнить заголовок и тело. ===
-            # Текущая версия dzen_poster.py имеет код заполнения ниже (от старого),
-            # но он рассчитан на старый UI. Сначала диагностически сохраним HTML
-            # редактора, чтобы подобрать селекторы заголовка/тела.
-            _save_snapshot(page, "06-editor-opened")
-            raise RuntimeError(
-                f"Diagnostic: дошли до редактора статьи URL={page.url}. "
-                "HTML сохранён в failures/06-editor-opened.html. "
-                "Следующий шаг — подбор селекторов заголовка и тела."
-            )
-
-            # Старый код ниже временно недосягаем
-            if "addpost" not in page.url and "editor" not in page.url:
-                _save_snapshot(page, "02-unexpected-url")
-                raise RuntimeError(f"Редиректнуло куда-то не туда: {page.url}")
-
-            # 1. Заголовок — пробуем расширенный список селекторов
-            title_candidates = [
-                'textarea[placeholder="Заголовок"]',
-                'textarea[aria-label="Заголовок"]',
-                'input[placeholder="Заголовок"]',
-                'input[aria-label="Заголовок"]',
-                'h1[contenteditable="true"]',
-                '[data-testid*="title"]',
-                '[data-testid*="header"]',
-                '[class*="title-input" i]',
-                '[class*="TitleInput" i]',
-                '[class*="header-input" i]',
-                'div[contenteditable="true"][role="textbox"]',
-                'div[contenteditable="true"]',
-            ]
-            title_clicked = False
-            for sel in title_candidates:
-                try:
-                    loc = page.locator(sel).first
-                    loc.click(timeout=3000)
-                    loc.fill(title) if "input" in sel or "textarea" in sel else loc.type(title)
-                    log.info("Заголовок введён через селектор: %s", sel)
-                    title_clicked = True
-                    break
-                except Exception as e:
-                    log.debug("заголовок не подошёл селектор %s: %s", sel, e)
-            if not title_clicked:
-                _save_snapshot(page, "03-no-title-field")
-                raise RuntimeError("Не нашёл поле заголовка ни по одному селектору")
-
-            page.wait_for_timeout(500)
-            _save_snapshot(page, "04-title-typed")
-
-            # 2. Тело
-            body_candidates = [
-                '[data-testid*="body"]',
-                '[data-testid*="content"]',
-                '[class*="content-editor" i]',
-                '[class*="ContentEditor" i]',
-                'div[contenteditable="true"][role="textbox"]',
-                'div.ProseMirror[contenteditable="true"]',
-                'div[contenteditable="true"]',
-            ]
-            body_typed = False
-            for sel in body_candidates:
-                try:
-                    locs = page.locator(sel).all()
-                    # Пробуем найти именно редактор тела, не поле заголовка
-                    for loc in locs:
-                        try:
-                            placeholder = loc.get_attribute("aria-label") or ""
-                            if "загол" in placeholder.lower():
-                                continue
-                            loc.click(timeout=2000)
-                            loc.type(body_md, delay=10)
-                            log.info("Тело введено через %s (%d символов)", sel, len(body_md))
-                            body_typed = True
-                            break
-                        except Exception:
-                            continue
-                    if body_typed:
-                        break
-                except Exception:
-                    continue
-            if not body_typed:
-                _save_snapshot(page, "05-no-body-editor")
-                raise RuntimeError("Не нашёл редактор тела статьи")
-
-            page.wait_for_timeout(800)
-            _save_snapshot(page, "06-body-typed")
-
-            # 3. Обложка
-            try:
-                file_input = page.locator('input[type="file"]').first
-                file_input.set_input_files(str(cover_path))
-                log.info("Обложка загружена: %s", cover_path)
-                page.wait_for_timeout(4000)
-                _save_snapshot(page, "07-cover-uploaded")
-            except Exception as exc:
-                log.warning("обложку не загрузил: %s", exc)
-                _save_snapshot(page, "07-no-cover-input")
-
-            # 4. Опубликовать
-            if not _click_button(page, "Опубликовать", "Опубликовать сейчас"):
-                _save_snapshot(page, "08-no-publish-btn")
-                raise RuntimeError("Не нашёл кнопку Опубликовать")
-
-            page.wait_for_timeout(2000)
-            _click_button(page, "Опубликовать", "Подтвердить", "Да, опубликовать", timeout=3000)
-
-            t0 = time.time()
-            while time.time() - t0 < 30:
-                if "/a/" in page.url or "/profile/editor" not in page.url:
+            # Ждём редиректа на страницу публикации
+            deadline = time.time() + 45
+            published_url = None
+            while time.time() < deadline:
+                url = page.url
+                if "/a/" in url or "/media/" in url:
+                    published_url = url
                     break
                 page.wait_for_timeout(1000)
 
+            page.wait_for_timeout(2000)
             url = page.url
-            log.info("Опубликовано: %s", url)
+            log.info("Финальный URL: %s", url)
             ctx.storage_state(path=str(config.DZEN_STATE_PATH))
             _save_snapshot(page, "99-published")
-            return url
+            return published_url or url
 
         except Exception as exc:
-            if page is not None:
-                _save_snapshot(page, "ZZ-final-failure")
+            _save_snapshot(page, "ZZ-final-failure")
             log.error("Поток упал: %s\n%s", exc, traceback.format_exc())
             raise RuntimeError(f"Playwright: {exc}") from exc
         finally:
