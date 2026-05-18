@@ -29,6 +29,7 @@ Flow:
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 import traceback
@@ -260,60 +261,118 @@ def _try_set_image_input(page: Page, cover_path: Path) -> bool:
         return False
 
 
+def _drop_file_via_js(page: Page, target_selector: str, cover_path: Path) -> dict:
+    """Симулирует drag-and-drop файла на target через JS DataTransfer.
+
+    Современный React (как у Дзена) часто слушает drop-эвент с DataTransfer,
+    а не file input. Этот способ работает даже в headless Chromium, потому
+    что не требует системного file chooser.
+    """
+    data_b64 = base64.b64encode(Path(cover_path).read_bytes()).decode()
+    filename = Path(cover_path).name
+    ext = filename.lower().rsplit(".", 1)[-1]
+    mime = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.get(ext, "image/png")
+
+    result = page.evaluate(
+        """([b64, filename, mime, selector]) => {
+            const target = document.querySelector(selector);
+            if (!target) return { ok: false, reason: 'target not found' };
+
+            const binary = atob(b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const blob = new Blob([bytes], { type: mime });
+            const file = new File([blob], filename, { type: mime });
+
+            const dt = new DataTransfer();
+            dt.items.add(file);
+
+            const rect = target.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+
+            const events = ['dragenter', 'dragover', 'drop'];
+            for (const evType of events) {
+                const ev = new DragEvent(evType, {
+                    bubbles: true,
+                    cancelable: true,
+                    dataTransfer: dt,
+                    clientX: x,
+                    clientY: y,
+                });
+                Object.defineProperty(ev, 'dataTransfer', { value: dt });
+                target.dispatchEvent(ev);
+            }
+            return { ok: true, fileSize: file.size, filename: filename };
+        }""",
+        [data_b64, filename, mime, target_selector],
+    )
+    return result or {"ok": False, "reason": "no result"}
+
+
 def _upload_cover_in_modal(page: Page, cover_path: Path) -> None:
     """Загружает обложку в модалке предпросмотра.
 
-    Несколько стратегий по убыванию надёжности:
-      1. Клик по zen-image-cover + expect_file_chooser (стандартный путь)
-      2. Клик по zen-image-cover → ждём, что Дзен инжектирует скрытый input в DOM
-         → set_input_files напрямую на этот input
-      3. Если input уже есть в DOM до клика — set_input_files без клика
+    Стратегии по убыванию надёжности:
+      1. JS drag-and-drop с File + DataTransfer на zen-image-cover
+         (главный путь — Дзен слушает drop)
+      2. file chooser + set_files (стандартный Playwright)
+      3. set_input_files на скрытый input в DOM (если есть)
     """
     cover_target = page.locator('[data-testid="zen-image-cover"]').first
     cover_target.wait_for(state="visible", timeout=10000)
+    cover_target.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
 
-    # 0) Diagnostic: список input до клика
+    # 1) JS drag-and-drop (главный путь)
+    log.info("Пробую drag-and-drop через DataTransfer")
+    drop_result = _drop_file_via_js(page, '[data-testid="zen-image-cover"]', cover_path)
+    log.info("drag-drop результат: %s", drop_result)
+    if drop_result.get("ok"):
+        # Дзен подгружает превью; даём время + проверяем визуально
+        page.wait_for_timeout(7000)
+        _save_snapshot(page, "12-cover-via-drag")
+        # Проверка: исчез ли placeholder? Стал ли publish-btn enabled?
+        publish_disabled = (
+            page.locator('[data-testid="publish-btn"]').first.get_attribute("disabled")
+        )
+        log.info("После drag-drop publish-btn disabled=%r", publish_disabled)
+        if publish_disabled is None:
+            log.info("Обложка загружена (publish-btn активна)")
+            return
+        log.warning("publish-btn всё ещё disabled — drag-drop не убедил Дзен; "
+                    "пробую запасные пути")
+
+    # 2) Перехват file chooser
+    log.info("Пробую expect_file_chooser")
     _list_file_inputs(page, "pre-click")
-
-    # 1) Попытка через file chooser
     try:
         with page.expect_file_chooser(timeout=5000) as fc_info:
             cover_target.click(force=True)
         fc = fc_info.value
         fc.set_files(str(cover_path))
-        log.info("Обложка ушла в file chooser zen-image-cover")
-        page.wait_for_timeout(5000)
+        log.info("Обложка ушла через file chooser")
+        page.wait_for_timeout(7000)
         _save_snapshot(page, "12-cover-via-chooser")
         return
     except PWTimeout:
-        log.warning("expect_file_chooser таймаут — пробую set_input_files")
+        log.warning("expect_file_chooser таймаут")
 
-    # 2) Клик мог инжектировать input в DOM — ждём и ищем
+    # 3) Возможно input появился в DOM после клика
     page.wait_for_timeout(1500)
     if _try_set_image_input(page, cover_path):
-        log.info("Обложка ушла через set_input_files (после клика)")
-        page.wait_for_timeout(5000)
+        log.info("Обложка ушла через set_input_files")
+        page.wait_for_timeout(7000)
         _save_snapshot(page, "12-cover-via-set-input")
         return
 
-    # 3) Возможно клик не сработал — пробуем кликнуть ещё раз без force,
-    #    плюс на дочерний placeholder
-    try:
-        placeholder = page.locator(
-            '[data-testid="zen-image-cover"] [class*="placeholder"]'
-        ).first
-        if placeholder.count():
-            placeholder.click()
-            page.wait_for_timeout(1500)
-            if _try_set_image_input(page, cover_path):
-                log.info("Обложка ушла через set_input_files (placeholder-click)")
-                page.wait_for_timeout(5000)
-                _save_snapshot(page, "12-cover-via-placeholder")
-                return
-    except Exception as exc:
-        log.debug("placeholder-click не сработал: %s", exc)
-
-    log.warning("Не удалось загрузить обложку никаким способом")
+    log.warning("Все стратегии загрузки обложки исчерпаны")
     _save_snapshot(page, "12-cover-failed")
 
 
