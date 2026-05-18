@@ -332,15 +332,31 @@ def _upload_cover_in_modal(page: Page, cover_path: Path) -> None:
     drop_result = _drop_file_via_js(page, '[data-testid="zen-image-cover"]', cover_path)
     log.info("drag-drop результат: %s", drop_result)
     if drop_result.get("ok"):
-        page.wait_for_timeout(12000)
-        cover_state = _check_cover_uploaded(page)
-        log.info("Состояние обложки после drag-drop: %s", cover_state)
-        _save_snapshot(page, "12-cover-via-drag")
-        if cover_state.get("isHttps"):
-            log.info("Обложка реально загружена на CDN Дзена")
-            return
+        # Ждём в цикле, пока src станет реальным CDN-урлом обложки
+        # (avatars.dzeninfra.ru), а не заглушкой (s3.dzeninfra.ru/zen-misc/stub).
+        deadline = time.time() + 60
+        cover_state = {}
+        while time.time() < deadline:
+            page.wait_for_timeout(2000)
+            cover_state = _check_cover_uploaded(page)
+            src = cover_state.get("src", "")
+            if "avatars.dzeninfra.ru" in src or "/get-zen_doc/" in src:
+                log.info("Обложка догружена на CDN: %s", cover_state)
+                _save_snapshot(page, "12-cover-via-drag-real")
+                return
+            if "stub" in src.lower():
+                log.info("Пока stub, продолжаю ждать: %s", src[:80])
+                continue
+            if cover_state.get("isHttps"):
+                log.info("Обложка с https-src (нестандартный, но не stub): %s",
+                         cover_state)
+                _save_snapshot(page, "12-cover-via-drag-https")
+                return
+        log.warning("60 сек ожидания CDN истекли, финальное состояние: %s",
+                    cover_state)
+        _save_snapshot(page, "12-cover-via-drag-stale")
         if cover_state.get("isBlob"):
-            log.warning("img.src=blob: — Дзен показал preview, но НЕ загрузил")
+            log.warning("img.src=blob: — preview, но НЕ CDN")
 
     log.info("Пробую expect_file_chooser на zen-image-cover")
     _list_file_inputs(page, "pre-click")
